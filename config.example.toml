@@ -1,0 +1,13 @@
+# oxidlp configuration
+
+# Directory where downloads are saved
+output_dir = "~/Videos"
+
+# Output filename template (yt-dlp format)
+output_template = "%(title)s.%(ext)s"
+
+# Maximum number of concurrent downloads
+max_concurrent_downloads = 3
+
+# Default format selection (yt-dlp format)
+default_format = "bestvideo+bestaudio/best"
