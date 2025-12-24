@@ -1,13 +1,13 @@
-use tokio::sync::mpsc;
-use crate::events::{AppEvent, Job, JobId, WorkerCommand};
-use crate::config::Config;
-
-mod ytdlp;
-
 use std::collections::HashMap;
 use std::sync::Arc;
+use tokio::sync::mpsc;
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
+
+use crate::config::Config;
+use crate::events::{AppEvent, JobId, WorkerCommand};
+
+mod ytdlp;
 
 type ActiveJobsMap = HashMap<JobId, CancellationToken>;
 
@@ -39,7 +39,21 @@ impl WorkerPool {
 
         while let Some(cmd) = self.command_rx.recv().await {
             match cmd {
-                WorkerCommand::StartJob(job) => {
+                WorkerCommand::FetchFormats { job_id, url } => {
+                    let event_tx = self.event_tx.clone();
+                    tokio::spawn(async move {
+                        if let Err(e) = ytdlp::fetch_formats(job_id, &url, event_tx.clone()).await {
+                            let _ = event_tx
+                                .send(AppEvent::JobFailed {
+                                    id: job_id,
+                                    error: e.to_string(),
+                                })
+                                .await;
+                        }
+                    });
+                }
+
+                WorkerCommand::StartJob { job, format_id } => {
                     let permit = semaphore.clone().acquire_owned().await;
                     if permit.is_err() {
                         continue;
@@ -59,20 +73,31 @@ impl WorkerPool {
 
                     tokio::spawn(async move {
                         let _permit = permit;
-                        
+
                         let _ = event_tx.send(AppEvent::JobStarted { id: job_id }).await;
 
-                        let result = ytdlp::download(&job, &config, event_tx.clone(), cancel_token).await;
+                        let result = ytdlp::download(
+                            &job,
+                            &format_id,
+                            &config,
+                            event_tx.clone(),
+                            cancel_token,
+                        )
+                        .await;
 
                         match result {
                             Ok(path) => {
-                                let _ = event_tx.send(AppEvent::JobCompleted { id: job_id, path }).await;
+                                let _ = event_tx
+                                    .send(AppEvent::JobCompleted { id: job_id, path })
+                                    .await;
                             }
                             Err(e) => {
-                                let _ = event_tx.send(AppEvent::JobFailed { 
-                                    id: job_id, 
-                                    error: e.to_string() 
-                                }).await;
+                                let _ = event_tx
+                                    .send(AppEvent::JobFailed {
+                                        id: job_id,
+                                        error: e.to_string(),
+                                    })
+                                    .await;
                             }
                         }
 
@@ -80,12 +105,14 @@ impl WorkerPool {
                         jobs.remove(&job_id);
                     });
                 }
+
                 WorkerCommand::CancelJob(id) => {
                     let jobs = self.active_jobs.lock().await;
                     if let Some(token) = jobs.get(&id) {
                         token.cancel();
                     }
                 }
+
                 WorkerCommand::Shutdown => {
                     let jobs = self.active_jobs.lock().await;
                     for token in jobs.values() {

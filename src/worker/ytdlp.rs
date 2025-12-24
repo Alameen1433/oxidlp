@@ -5,24 +5,80 @@ use tokio::process::Command;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use color_eyre::Result;
+use serde::Deserialize;
 
 use crate::config::Config;
-use crate::events::{AppEvent, Job};
+use crate::events::{AppEvent, Format, Job, JobId};
+
+#[derive(Debug, Deserialize)]
+struct VideoInfo {
+    title: String,
+    formats: Vec<Format>,
+}
+
+pub async fn fetch_formats(
+    job_id: JobId,
+    url: &str,
+    event_tx: mpsc::Sender<AppEvent>,
+) -> Result<()> {
+    let output = Command::new("yt-dlp")
+        .arg("--dump-json")
+        .arg("--no-download")
+        .arg("--no-warnings")
+        .arg(url)
+        .output()
+        .await?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let _ = event_tx
+            .send(AppEvent::JobFailed {
+                id: job_id,
+                error: stderr.to_string(),
+            })
+            .await;
+        return Ok(());
+    }
+
+    let json_str = String::from_utf8_lossy(&output.stdout);
+    let info: VideoInfo = serde_json::from_str(&json_str)?;
+
+    // Filter to useful formats (video with audio, or standalone video/audio)
+    let formats: Vec<Format> = info
+        .formats
+        .into_iter()
+        .filter(|f| {
+            // Keep formats that have video
+            f.is_video() && f.height.is_some()
+        })
+        .collect();
+
+    let _ = event_tx
+        .send(AppEvent::FormatsReady {
+            id: job_id,
+            title: info.title,
+            formats,
+        })
+        .await;
+
+    Ok(())
+}
 
 pub async fn download(
     job: &Job,
+    format_id: &str,
     config: &Config,
     event_tx: mpsc::Sender<AppEvent>,
     cancel: CancellationToken,
 ) -> Result<PathBuf> {
     let output_template = config.output_dir.join(&config.output_template);
-    
+
     let mut child = Command::new("yt-dlp")
         .arg("--newline")
         .arg("--progress")
         .arg("--no-colors")
         .arg("-f")
-        .arg(&config.default_format)
+        .arg(format!("{}+bestaudio/best", format_id))
         .arg("-o")
         .arg(output_template.to_string_lossy().as_ref())
         .arg("--print")
@@ -53,12 +109,6 @@ pub async fn download(
                                 speed: progress.speed,
                                 eta: progress.eta,
                             }).await;
-                        } else if let Some(title) = parse_title(&line_content) {
-                            let _ = event_tx.send(AppEvent::JobMetadata {
-                                id: job.id,
-                                title,
-                                duration: None,
-                            }).await;
                         } else if !line_content.starts_with('[') && line_content.contains('/') {
                             final_path = Some(PathBuf::from(line_content.trim()));
                         }
@@ -74,7 +124,7 @@ pub async fn download(
     }
 
     let status = child.wait().await?;
-    
+
     if !status.success() {
         color_eyre::eyre::bail!("yt-dlp exited with code: {:?}", status.code());
     }
@@ -108,28 +158,15 @@ fn parse_progress(line: &str) -> Option<Progress> {
         .to_string();
 
     let eta = if let Some(idx) = line.find("ETA") {
-        line[idx + 3..].trim().split_whitespace().next().unwrap_or("--").to_string()
+        line[idx + 3..]
+            .trim()
+            .split_whitespace()
+            .next()
+            .unwrap_or("--")
+            .to_string()
     } else {
         "--".to_string()
     };
 
     Some(Progress { percent, speed, eta })
-}
-
-fn parse_title(line: &str) -> Option<String> {
-    if line.contains("[info]") && line.contains("title:") {
-        let title = line.split("title:").nth(1)?.trim().to_string();
-        return Some(title);
-    }
-    
-    if line.contains("[download] Destination:") {
-        let path = line.split("Destination:").nth(1)?.trim();
-        let filename = PathBuf::from(path)
-            .file_stem()?
-            .to_string_lossy()
-            .to_string();
-        return Some(filename);
-    }
-
-    None
 }
