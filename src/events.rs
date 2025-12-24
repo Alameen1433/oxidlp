@@ -134,7 +134,7 @@ pub enum AppEvent {
 #[derive(Debug, Clone)]
 pub enum WorkerCommand {
     FetchFormats { job_id: JobId, url: String },
-    StartJob { job: Job, format_id: String },
+    StartJob { job: Box<Job>, format_id: String },
     CancelJob(JobId),
     Shutdown,
 }

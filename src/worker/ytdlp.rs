@@ -1,5 +1,6 @@
 use std::path::PathBuf;
 use std::process::Stdio;
+use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 use tokio::sync::mpsc;
@@ -67,7 +68,7 @@ pub async fn fetch_formats(
 pub async fn download(
     job: &Job,
     format_id: &str,
-    config: &Config,
+    config: &Arc<Config>,
     event_tx: mpsc::Sender<AppEvent>,
     cancel: CancellationToken,
 ) -> Result<PathBuf> {
@@ -159,7 +160,6 @@ fn parse_progress(line: &str) -> Option<Progress> {
 
     let eta = if let Some(idx) = line.find("ETA") {
         line[idx + 3..]
-            .trim()
             .split_whitespace()
             .next()
             .unwrap_or("--")

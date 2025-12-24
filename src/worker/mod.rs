@@ -12,7 +12,7 @@ mod ytdlp;
 type ActiveJobsMap = HashMap<JobId, CancellationToken>;
 
 pub struct WorkerPool {
-    config: Config,
+    config: Arc<Config>,
     command_rx: mpsc::Receiver<WorkerCommand>,
     event_tx: mpsc::Sender<AppEvent>,
     active_jobs: Arc<Mutex<ActiveJobsMap>>,
@@ -20,7 +20,7 @@ pub struct WorkerPool {
 
 impl WorkerPool {
     pub fn new(
-        config: Config,
+        config: Arc<Config>,
         command_rx: mpsc::Receiver<WorkerCommand>,
         event_tx: mpsc::Sender<AppEvent>,
     ) -> Self {

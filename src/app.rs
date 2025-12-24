@@ -138,11 +138,9 @@ impl App {
                             job.status = JobStatus::Queued;
                         }
                     }
-                } else {
-                    if let Some(job) = self.jobs.get_mut(popup.job_index) {
-                        job.selected_format = Some(format);
-                        job.status = JobStatus::Queued;
-                    }
+                } else if let Some(job) = self.jobs.get_mut(popup.job_index) {
+                    job.selected_format = Some(format);
+                    job.status = JobStatus::Queued;
                 }
             }
 
@@ -151,7 +149,7 @@ impl App {
                     if job.status == JobStatus::Queued {
                         if let Some(fmt) = &job.selected_format {
                             let _ = self.worker_tx.try_send(WorkerCommand::StartJob {
-                                job: job.clone(),
+                                job: Box::new(job.clone()),
                                 format_id: fmt.format_id.clone(),
                             });
                         }

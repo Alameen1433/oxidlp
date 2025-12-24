@@ -88,7 +88,8 @@ fn render_input(f: &mut Frame, app: &App, area: Rect) {
     f.render_widget(input, area);
 
     if app.input_mode && app.format_popup.is_none() {
-        f.set_cursor_position((area.x + app.input_buffer.len() as u16 + 1, area.y + 1));
+        let cursor_x = (area.x + 1 + app.input_buffer.len() as u16).min(area.x + area.width.saturating_sub(2));
+        f.set_cursor_position((cursor_x, area.y + 1));
     }
 }
 
@@ -98,17 +99,16 @@ fn render_queue(f: &mut Frame, app: &App, area: Rect) {
     for (i, job) in app.jobs.iter().enumerate() {
         let is_selected = i == app.selected_index && !app.input_mode;
 
-        let (badge, badge_style) = match &job.status {
-            JobStatus::FetchingFormats => ("[FETCHING]", Style::default().fg(YELLOW)),
-            JobStatus::Ready { .. } => ("[READY]", Style::default().fg(GREEN)),
-            JobStatus::Queued => ("[QUEUED]", Style::default().fg(CYAN)),
+        let (badge, badge_style): (String, Style) = match &job.status {
+            JobStatus::FetchingFormats => ("[FETCHING]".into(), Style::default().fg(YELLOW)),
+            JobStatus::Ready { .. } => ("[READY]".into(), Style::default().fg(GREEN)),
+            JobStatus::Queued => ("[QUEUED]".into(), Style::default().fg(CYAN)),
             JobStatus::Downloading { percent, .. } => {
-                let badge_text = format!("[{:.0}%]", percent);
-                (Box::leak(badge_text.into_boxed_str()) as &str, Style::default().fg(CYAN))
+                (format!("[{:.0}%]", percent), Style::default().fg(CYAN))
             }
-            JobStatus::Completed => ("[DONE]", Style::default().fg(GREEN)),
-            JobStatus::Failed(_) => ("[FAILED]", Style::default().fg(RED)),
-            JobStatus::Cancelled => ("[CANCELLED]", Style::default().fg(MUTED)),
+            JobStatus::Completed => ("[DONE]".into(), Style::default().fg(GREEN)),
+            JobStatus::Failed(_) => ("[FAILED]".into(), Style::default().fg(RED)),
+            JobStatus::Cancelled => ("[CANCELLED]".into(), Style::default().fg(MUTED)),
         };
 
         let prefix = if is_selected { "> " } else { "  " };
@@ -120,10 +120,10 @@ fn render_queue(f: &mut Frame, app: &App, area: Rect) {
 
         let display_name = job.display_name();
         let max_len = (area.width as usize).saturating_sub(badge.len() + 5);
-        let truncated = if display_name.len() > max_len {
+        let truncated: String = if display_name.len() > max_len {
             format!("{}...", &display_name[..max_len.saturating_sub(3)])
         } else {
-            display_name.to_string()
+            display_name.into()
         };
 
         let line = Line::from(vec![
@@ -191,25 +191,28 @@ fn render_details(f: &mut Frame, app: &App, area: Rect) {
             lines.push(Line::from(Span::styled("Formats Available:", Style::default().fg(MUTED))));
             lines.push(Line::from(Span::styled("─".repeat(inner.width as usize - 2), Style::default().fg(MUTED))));
             
-            let video_fmts: Vec<_> = formats.iter().filter(|f| f.is_video()).take(3).collect();
-            let audio_fmts: Vec<_> = formats.iter().filter(|f| f.is_audio_only()).take(2).collect();
-
-            for fmt in video_fmts {
-                let info = format!(
-                    "▶ {} · {} · {}",
-                    fmt.ext.to_uppercase(),
-                    fmt.display_resolution(),
-                    fmt.display_bitrate()
-                );
-                lines.push(Line::from(Span::styled(info, Style::default().fg(CYAN))));
-            }
-            for fmt in audio_fmts {
-                let info = format!(
-                    "▶ {} · {} · AUDIO",
-                    fmt.ext.to_uppercase(),
-                    fmt.display_bitrate()
-                );
-                lines.push(Line::from(Span::styled(info, Style::default().fg(GREEN))));
+            let mut video_count = 0;
+            let mut audio_count = 0;
+            for fmt in formats.iter() {
+                if video_count < 3 && fmt.is_video() {
+                    let info = format!(
+                        "▶ {} · {} · {}",
+                        fmt.ext.to_uppercase(),
+                        fmt.display_resolution(),
+                        fmt.display_bitrate()
+                    );
+                    lines.push(Line::from(Span::styled(info, Style::default().fg(CYAN))));
+                    video_count += 1;
+                } else if audio_count < 2 && fmt.is_audio_only() {
+                    let info = format!(
+                        "▶ {} · {} · AUDIO",
+                        fmt.ext.to_uppercase(),
+                        fmt.display_bitrate()
+                    );
+                    lines.push(Line::from(Span::styled(info, Style::default().fg(GREEN))));
+                    audio_count += 1;
+                }
+                if video_count >= 3 && audio_count >= 2 { break; }
             }
             
             lines.push(Line::from(""));
@@ -233,10 +236,12 @@ fn render_details(f: &mut Frame, app: &App, area: Rect) {
         JobStatus::Downloading { percent, speed, eta } => {
             lines.push(Line::from(Span::styled("Downloading...", Style::default().fg(CYAN))));
             
-            let bar_width = (inner.width as usize).saturating_sub(10);
+            let bar_width = (inner.width as usize).saturating_sub(2);
             let filled = ((percent / 100.0) * bar_width as f32) as usize;
             let empty = bar_width.saturating_sub(filled);
-            let bar = format!("█{}░{}", "█".repeat(filled), "░".repeat(empty));
+            let mut bar = String::with_capacity(bar_width * 3);
+            (0..filled).for_each(|_| bar.push('█'));
+            (0..empty).for_each(|_| bar.push('░'));
             lines.push(Line::from(Span::styled(bar, Style::default().fg(CYAN))));
             
             lines.push(Line::from(Span::styled(

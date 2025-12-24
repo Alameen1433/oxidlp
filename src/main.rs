@@ -17,6 +17,7 @@ use crossterm::{
 use ratatui::prelude::*;
 use tokio::sync::mpsc;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
+use std::sync::Arc;
 
 use app::App;
 use config::{check_ytdlp, Config};
@@ -62,9 +63,10 @@ async fn main() -> Result<()> {
         config.output_dir = output.into();
     }
     config.max_concurrent_downloads = cli.concurrent;
+    let config = Arc::new(config);
     let (worker_tx, worker_rx) = mpsc::channel(32);
     let (event_tx, mut event_rx) = mpsc::channel(32);
-    let mut app = App::new(config.clone(), worker_tx);
+    let mut app = App::new((*config).clone(), worker_tx);
     
     for url in cli.urls {
         app.handle_event(AppEvent::AddUrl(url));
