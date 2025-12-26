@@ -5,6 +5,7 @@ use ratatui::{
     widgets::{Block, Borders, Clear, List, ListItem, Paragraph},
     Frame,
 };
+use sysinfo::Pid;
 
 use crate::app::App;
 use crate::events::JobStatus;
@@ -40,15 +41,37 @@ pub fn render(f: &mut Frame, app: &App) {
         .split(main_chunks[1]);
 
     render_queue(f, app, content_chunks[0]);
-    render_details(f, app, content_chunks[1]);
+    
+    if app.show_sysinfo {
+        let right_chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Min(8),
+                Constraint::Length(8),
+            ])
+            .split(content_chunks[1]);
+        render_details(f, app, right_chunks[0]);
+        render_sysinfo(f, app, right_chunks[1]);
+    } else {
+        render_details(f, app, content_chunks[1]);
+    }
+    
     render_status_bar(f, app, main_chunks[2]);
 
     if app.format_popup.is_some() {
         render_format_popup(f, app);
     }
 
+    if app.settings_popup.is_some() {
+        render_settings_popup(f, app);
+    }
+
     if app.show_help {
         render_help_popup(f);
+    }
+
+    if app.confirm_quit {
+        render_confirm_quit(f);
     }
 }
 
@@ -57,6 +80,15 @@ fn render_input(f: &mut Frame, app: &App, area: Rect) {
         Style::default().fg(CYAN)
     } else {
         Style::default().fg(MUTED)
+    };
+
+    const SPINNER_FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+    
+    let spinner_text = if app.loading_playlists > 0 {
+        let frame = SPINNER_FRAMES[app.spinner_frame % SPINNER_FRAMES.len()];
+        format!(" {} parsing playlist...", frame)
+    } else {
+        String::new()
     };
 
     let placeholder = if app.input_buffer.is_empty() && app.input_mode {
@@ -77,12 +109,20 @@ fn render_input(f: &mut Frame, app: &App, area: Rect) {
         input_style
     };
 
+    let title = if app.loading_playlists > 0 {
+        format!(" Input{} ", spinner_text)
+    } else {
+        " Input ".to_string()
+    };
+
     let input = Paragraph::new(display_text)
         .style(text_style)
         .block(
             Block::default()
                 .borders(Borders::ALL)
                 .border_style(input_style)
+                .title(title)
+                .title_style(if app.loading_playlists > 0 { Style::default().fg(YELLOW) } else { input_style })
         );
 
     f.render_widget(input, area);
@@ -237,11 +277,7 @@ fn render_details(f: &mut Frame, app: &App, area: Rect) {
             lines.push(Line::from(Span::styled("Downloading...", Style::default().fg(CYAN))));
             
             let bar_width = (inner.width as usize).saturating_sub(2);
-            let filled = ((percent / 100.0) * bar_width as f32) as usize;
-            let empty = bar_width.saturating_sub(filled);
-            let mut bar = String::with_capacity(bar_width * 3);
-            (0..filled).for_each(|_| bar.push('█'));
-            (0..empty).for_each(|_| bar.push('░'));
+            let bar = progress_bar(bar_width, *percent);
             lines.push(Line::from(Span::styled(bar, Style::default().fg(CYAN))));
             
             lines.push(Line::from(Span::styled(
@@ -276,34 +312,47 @@ fn render_details(f: &mut Frame, app: &App, area: Rect) {
 }
 
 fn render_status_bar(f: &mut Frame, app: &App, area: Rect) {
-    let fetching = app.fetching_count();
-    let ready = app.ready_count();
-    let queued = app.queued_count();
-    let active = app.active_count();
-    let completed = app.completed_count();
-    let failed = app.jobs.iter().filter(|j| matches!(j.status, JobStatus::Failed(_))).count();
+    let counts = app.status_counts();
 
     let mode = if app.input_mode { "INPUT" } else { "QUEUE" };
-    let queue_pos = format!("({}/{})", app.selected_index + 1, app.jobs.len().max(1));
 
-    let status = Line::from(vec![
-        Span::styled(
-            format!(" {} ", mode),
-            Style::default().fg(BG).bg(CYAN),
-        ),
-        Span::styled(format!(" {} ", queue_pos), Style::default().fg(MUTED)),
-        Span::styled("│ ", Style::default().fg(MUTED)),
-        Span::styled("oxidlp", Style::default().fg(CYAN)),
-        Span::styled(" │ ", Style::default().fg(MUTED)),
-        Span::styled(format!("{}↻ ", fetching), Style::default().fg(YELLOW)),
-        Span::styled(format!("{}● ", ready), Style::default().fg(GREEN)),
-        Span::styled(format!("{}◇ ", queued), Style::default().fg(CYAN)),
-        Span::styled(format!("{}▼ ", active), Style::default().fg(CYAN)),
-        Span::styled(format!("{}✓ ", completed), Style::default().fg(GREEN)),
-        Span::styled(format!("{}✗", failed), Style::default().fg(RED)),
-        Span::styled(" │ ", Style::default().fg(MUTED)),
-        Span::styled("? help  q quit", Style::default().fg(MUTED)),
-    ]);
+    let mut spans = vec![
+        Span::styled(format!(" {} ", mode), Style::default().fg(BG).bg(if app.input_mode { CYAN } else { YELLOW })),
+        Span::styled("  ", Style::default()),
+    ];
+    
+    if app.loading_playlists > 0 {
+        spans.push(Span::styled("⟳ parsing ", Style::default().fg(YELLOW)));
+    }
+    
+    if counts.fetching > 0 {
+        spans.push(Span::styled(format!("↻{} ", counts.fetching), Style::default().fg(YELLOW)));
+    }
+    if counts.ready > 0 {
+        spans.push(Span::styled(format!("●{} ", counts.ready), Style::default().fg(GREEN)));
+    }
+    if counts.queued > 0 {
+        spans.push(Span::styled(format!("◇{} ", counts.queued), Style::default().fg(CYAN)));
+    }
+    if counts.active > 0 {
+        spans.push(Span::styled(format!("▼{} ", counts.active), Style::default().fg(CYAN).add_modifier(Modifier::BOLD)));
+    }
+    if counts.completed > 0 {
+        spans.push(Span::styled(format!("✓{} ", counts.completed), Style::default().fg(GREEN)));
+    }
+    if counts.failed > 0 {
+        spans.push(Span::styled(format!("✗{}", counts.failed), Style::default().fg(RED)));
+    }
+    
+    spans.push(Span::styled("  │  ", Style::default().fg(MUTED)));
+    spans.push(Span::styled("?", Style::default().fg(CYAN)));
+    spans.push(Span::styled(" help  ", Style::default().fg(MUTED)));
+    spans.push(Span::styled("g", Style::default().fg(CYAN)));
+    spans.push(Span::styled(" settings  ", Style::default().fg(MUTED)));
+    spans.push(Span::styled("q", Style::default().fg(CYAN)));
+    spans.push(Span::styled(" quit", Style::default().fg(MUTED)));
+
+    let status = Line::from(spans);
 
     let bar = Paragraph::new(status).block(
         Block::default()
@@ -321,13 +370,7 @@ fn render_format_popup(f: &mut Frame, app: &App) {
     let area = centered_rect(60, 65, f.area());
     f.render_widget(Clear, area);
 
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(CYAN))
-        .title(" Select Format ")
-        .title_style(Style::default().fg(CYAN))
-        .style(Style::default().bg(BG));
-    
+    let block = popup_block(" Select Format ");
     let inner = block.inner(area);
     f.render_widget(block, area);
 
@@ -448,19 +491,14 @@ fn render_help_popup(f: &mut Frame) {
         Line::from(vec![Span::styled("  Esc     ", Style::default().fg(YELLOW)), Span::styled("Close without selecting", Style::default().fg(TEXT))]),
         Line::from(""),
         Line::from(Span::styled("General", Style::default().fg(CYAN))),
+        Line::from(vec![Span::styled("  g       ", Style::default().fg(YELLOW)), Span::styled("Open settings", Style::default().fg(TEXT))]),
+        Line::from(vec![Span::styled("  S       ", Style::default().fg(YELLOW)), Span::styled("Toggle system info panel", Style::default().fg(TEXT))]),
         Line::from(vec![Span::styled("  ?       ", Style::default().fg(YELLOW)), Span::styled("Toggle this help", Style::default().fg(TEXT))]),
         Line::from(vec![Span::styled("  q       ", Style::default().fg(YELLOW)), Span::styled("Quit application", Style::default().fg(TEXT))]),
     ];
 
     let help = Paragraph::new(help_text)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(CYAN))
-                .title(" Help ")
-                .title_style(Style::default().fg(CYAN))
-                .style(Style::default().bg(BG)),
-        )
+        .block(popup_block(" Help "))
         .style(Style::default().bg(BG));
 
     f.render_widget(help, area);
@@ -484,6 +522,22 @@ fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
             Constraint::Percentage((100 - percent_x) / 2),
         ])
         .split(popup_layout[1])[1]
+}
+
+fn progress_bar(width: usize, percent: f32) -> String {
+    let filled = ((percent / 100.0) * width as f32) as usize;
+    std::iter::repeat_n('█', filled)
+        .chain(std::iter::repeat_n('░', width.saturating_sub(filled)))
+        .collect()
+}
+
+fn popup_block(title: &str) -> Block<'_> {
+    Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(CYAN))
+        .title(title)
+        .title_style(Style::default().fg(CYAN))
+        .style(Style::default().bg(BG))
 }
 
 fn textwrap_simple(text: &str, width: usize) -> Vec<String> {
@@ -511,4 +565,143 @@ fn textwrap_simple(text: &str, width: usize) -> Vec<String> {
     }
     
     lines
+}
+
+fn render_sysinfo(f: &mut Frame, app: &App, area: Rect) {
+    let pid = Pid::from_u32(std::process::id());
+    
+    let (cpu, rss) = app.sysinfo.process(pid).map_or((0.0, 0), |p| {
+        (p.cpu_usage(), p.memory())
+    });
+    
+    let rss_mb = rss as f64 / (1024.0 * 1024.0);
+    
+    let mut lines = vec![
+        Line::from(vec![
+            Span::styled("CPU  ", Style::default().fg(MUTED)),
+            Span::styled(format!("{:.1}%", cpu), Style::default().fg(CYAN)),
+        ]),
+        Line::from(vec![
+            Span::styled("RSS  ", Style::default().fg(MUTED)),
+            Span::styled(format!("{:.1} MB", rss_mb), Style::default().fg(GREEN)),
+        ]),
+    ];
+    
+    if let Some((percent, speed, eta)) = app.aggregate_progress() {
+        lines.push(Line::from(""));
+        let bar_width = (area.width as usize).saturating_sub(4);
+        let bar = progress_bar(bar_width, percent);
+        lines.push(Line::from(Span::styled(bar, Style::default().fg(CYAN))));
+        lines.push(Line::from(vec![
+            Span::styled(format!("{:.0}%", percent), Style::default().fg(TEXT)),
+            Span::styled(" · ", Style::default().fg(MUTED)),
+            Span::styled(speed, Style::default().fg(CYAN)),
+            Span::styled(" · ETA ", Style::default().fg(MUTED)),
+            Span::styled(eta, Style::default().fg(TEXT)),
+        ]));
+    }
+    
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(MUTED))
+        .title(" System ")
+        .title_style(Style::default().fg(MUTED));
+    
+    let para = Paragraph::new(lines).block(block);
+    f.render_widget(para, area);
+}
+
+fn render_confirm_quit(f: &mut Frame) {
+    let area = centered_rect(40, 20, f.area());
+    f.render_widget(Clear, area);
+    
+    let text = vec![
+        Line::from(""),
+        Line::from(Span::styled("Downloads in progress!", Style::default().fg(YELLOW))),
+        Line::from(""),
+        Line::from(Span::styled("Quit anyway?", Style::default().fg(TEXT))),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("[Y]", Style::default().fg(GREEN)),
+            Span::styled(" Yes  ", Style::default().fg(TEXT)),
+            Span::styled("[N]", Style::default().fg(RED)),
+            Span::styled(" No", Style::default().fg(TEXT)),
+        ]),
+    ];
+    
+    let popup = Paragraph::new(text)
+        .alignment(ratatui::layout::Alignment::Center)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(YELLOW))
+                .title(" Confirm Exit ")
+                .title_style(Style::default().fg(YELLOW))
+                .style(Style::default().bg(BG)),
+        );
+    
+    f.render_widget(popup, area);
+}
+
+fn render_settings_popup(f: &mut Frame, app: &App) {
+    let Some(settings) = &app.settings_popup else { return };
+    
+    let area = centered_rect(55, 35, f.area());
+    f.render_widget(Clear, area);
+    
+    let concurrent_style = if settings.selected_field == 0 {
+        Style::default().fg(CYAN).add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(TEXT)
+    };
+    
+    let path_style = if settings.selected_field == 1 {
+        if settings.editing_path {
+            Style::default().fg(GREEN).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(CYAN).add_modifier(Modifier::BOLD)
+        }
+    } else {
+        Style::default().fg(TEXT)
+    };
+    
+    let text = vec![
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("  Concurrent Downloads: ", Style::default().fg(MUTED)),
+            Span::styled("◄ ", Style::default().fg(if settings.selected_field == 0 { CYAN } else { MUTED })),
+            Span::styled(format!("{}", settings.concurrent_downloads), concurrent_style),
+            Span::styled(" ►", Style::default().fg(if settings.selected_field == 0 { CYAN } else { MUTED })),
+        ]),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("  Download Location: ", Style::default().fg(MUTED)),
+        ]),
+        Line::from(vec![
+            Span::styled("  ", Style::default()),
+            Span::styled(&settings.output_dir, path_style),
+            Span::styled(if settings.editing_path { "│" } else { "" }, Style::default().fg(GREEN)),
+        ]),
+        Line::from(""),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("  ", Style::default()),
+            Span::styled("[s]", Style::default().fg(CYAN)),
+            Span::styled(" Save  ", Style::default().fg(TEXT)),
+            Span::styled("[Esc]", Style::default().fg(MUTED)),
+            Span::styled(" Cancel", Style::default().fg(TEXT)),
+        ]),
+        Line::from(vec![
+            Span::styled("  ", Style::default()),
+            Span::styled("[←/→]", Style::default().fg(MUTED)),
+            Span::styled(" Adjust  ", Style::default().fg(TEXT)),
+            Span::styled("[Enter]", Style::default().fg(MUTED)),
+            Span::styled(" Edit path", Style::default().fg(TEXT)),
+        ]),
+    ];
+    
+    let popup = Paragraph::new(text)
+        .block(popup_block(" Settings "));
+    
+    f.render_widget(popup, area);
 }

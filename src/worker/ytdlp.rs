@@ -9,7 +9,7 @@ use color_eyre::Result;
 use serde::Deserialize;
 
 use crate::config::Config;
-use crate::events::{AppEvent, Format, Job, JobId};
+use crate::events::{AppEvent, Format, JobId};
 
 #[derive(Debug, Deserialize)]
 struct VideoInfo {
@@ -65,8 +65,46 @@ pub async fn fetch_formats(
     Ok(())
 }
 
+#[derive(Debug, Deserialize)]
+struct PlaylistEntry {
+    url: String,
+    title: Option<String>,
+}
+
+
+pub async fn fetch_playlist(url: &str) -> Result<Vec<(String, Option<String>)>> {
+    let output = Command::new("yt-dlp")
+        .arg("--flat-playlist")
+        .arg("--dump-json")
+        .arg("--no-warnings")
+        .arg(url)
+        .output()
+        .await?;
+
+    if !output.status.success() {
+        color_eyre::eyre::bail!("Failed to fetch playlist");
+    }
+
+    let json_str = String::from_utf8_lossy(&output.stdout);
+    
+    let mut urls = Vec::new();
+    for line in json_str.lines() {
+        if let Ok(entry) = serde_json::from_str::<PlaylistEntry>(line) {
+            let video_url = if entry.url.starts_with("http") {
+                entry.url
+            } else {
+                format!("https://www.youtube.com/watch?v={}", entry.url)
+            };
+            urls.push((video_url, entry.title));
+        }
+    }
+    
+    Ok(urls)
+}
+
 pub async fn download(
-    job: &Job,
+    job_id: JobId,
+    url: &str,
     format_id: &str,
     config: &Arc<Config>,
     event_tx: mpsc::Sender<AppEvent>,
@@ -84,7 +122,7 @@ pub async fn download(
         .arg(output_template.to_string_lossy().as_ref())
         .arg("--print")
         .arg("after_move:filepath")
-        .arg(&job.url)
+        .arg(url)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()?;
@@ -105,7 +143,7 @@ pub async fn download(
                     Ok(Some(line_content)) => {
                         if let Some(progress) = parse_progress(&line_content) {
                             let _ = event_tx.send(AppEvent::JobProgress {
-                                id: job.id,
+                                id: job_id,
                                 percent: progress.percent,
                                 speed: progress.speed,
                                 eta: progress.eta,

@@ -53,12 +53,12 @@ async fn main() -> Result<()> {
         .with(tracing_subscriber::EnvFilter::from_default_env())
         .init();
 
-    let ytdlp_version = check_ytdlp()?;
+    let ytdlp_version = check_ytdlp().await?;
     tracing::info!("Found yt-dlp version: {}", ytdlp_version);
 
     let cli = Cli::parse();
     
-    let mut config = Config::load()?;
+    let mut config = Config::load().await?;
     if let Some(output) = cli.output {
         config.output_dir = output.into();
     }
@@ -95,7 +95,15 @@ async fn run_app<B: Backend>(
     app: &mut App,
     event_rx: &mut mpsc::Receiver<AppEvent>,
 ) -> Result<()> {
+    let pid = sysinfo::Pid::from_u32(std::process::id());
+    
     loop {
+        if app.show_sysinfo {
+            app.sysinfo.refresh_processes(sysinfo::ProcessesToUpdate::Some(&[pid]), true);
+        }
+        if app.loading_playlists > 0 {
+            app.spinner_frame = app.spinner_frame.wrapping_add(1);
+        }
         terminal.draw(|f| ui::render(f, app))?;
 
         tokio::select! {

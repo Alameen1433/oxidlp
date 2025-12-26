@@ -1,7 +1,8 @@
+use sysinfo::System;
 use tokio::sync::mpsc;
 
 use crate::config::Config;
-use crate::events::{AppEvent, FormatPopupState, Job, JobStatus, WorkerCommand};
+use crate::events::{AppEvent, FormatPopupState, Job, JobStatus, SettingsState, StatusCounts, WorkerCommand};
 
 pub struct App {
     pub jobs: Vec<Job>,
@@ -9,9 +10,15 @@ pub struct App {
     pub input_buffer: String,
     pub input_mode: bool,
     pub show_help: bool,
+    pub show_sysinfo: bool,
     pub should_quit: bool,
+    pub confirm_quit: bool,
+    pub loading_playlists: usize,
+    pub spinner_frame: usize,
     pub format_popup: Option<FormatPopupState>,
+    pub settings_popup: Option<SettingsState>,
     pub config: Config,
+    pub sysinfo: System,
     worker_tx: mpsc::Sender<WorkerCommand>,
 }
 
@@ -23,9 +30,15 @@ impl App {
             input_buffer: String::new(),
             input_mode: true,
             show_help: false,
+            show_sysinfo: true,
             should_quit: false,
+            confirm_quit: false,
+            loading_playlists: 0,
+            spinner_frame: 0,
             format_popup: None,
+            settings_popup: None,
             config,
+            sysinfo: System::new_all(),
             worker_tx,
         }
     }
@@ -34,11 +47,21 @@ impl App {
         match event {
             AppEvent::AddUrl(url) => {
                 if !url.trim().is_empty() {
-                    let job = Job::new(url.trim());
-                    let job_id = job.id;
-                    let url = job.url.clone();
-                    self.jobs.push(job);
-                    let _ = self.worker_tx.try_send(WorkerCommand::FetchFormats { job_id, url });
+                    let url = url.trim();
+                    if is_playlist_url(url) {
+                        self.loading_playlists += 1;
+                        if self.worker_tx.try_send(WorkerCommand::FetchPlaylist { url: url.to_string() }).is_err() {
+                            tracing::warn!("Worker channel full: FetchPlaylist dropped");
+                        }
+                    } else {
+                        let job = Job::new(url);
+                        let job_id = job.id;
+                        let job_url = job.url.clone();
+                        self.jobs.push(job);
+                        if self.worker_tx.try_send(WorkerCommand::FetchFormats { job_id, url: job_url }).is_err() {
+                            tracing::warn!("Worker channel full: FetchFormats dropped");
+                        }
+                    }
                 }
             }
 
@@ -148,17 +171,22 @@ impl App {
                 for job in &self.jobs {
                     if job.status == JobStatus::Queued {
                         if let Some(fmt) = &job.selected_format {
-                            let _ = self.worker_tx.try_send(WorkerCommand::StartJob {
-                                job: Box::new(job.clone()),
+                            if self.worker_tx.try_send(WorkerCommand::StartJob {
+                                job_id: job.id,
+                                url: job.url.clone(),
                                 format_id: fmt.format_id.clone(),
-                            });
+                            }).is_err() {
+                                tracing::warn!("Worker channel full: StartJob dropped");
+                            }
                         }
                     }
                 }
             }
 
             AppEvent::CancelJob(id) => {
-                let _ = self.worker_tx.try_send(WorkerCommand::CancelJob(id));
+                if self.worker_tx.try_send(WorkerCommand::CancelJob(id)).is_err() {
+                    tracing::warn!("Worker channel full: CancelJob dropped");
+                }
                 if let Some(job) = self.jobs.iter_mut().find(|j| j.id == id) {
                     job.status = JobStatus::Cancelled;
                 }
@@ -175,7 +203,24 @@ impl App {
                 self.show_help = !self.show_help;
             }
 
+            AppEvent::ToggleSysInfo => {
+                self.show_sysinfo = !self.show_sysinfo;
+            }
+
             AppEvent::Quit => {
+                if !self.confirm_quit {
+                    self.confirm_quit = true;
+                } else {
+                    let _ = self.worker_tx.try_send(WorkerCommand::Shutdown);
+                    self.should_quit = true;
+                }
+            }
+
+            AppEvent::CancelQuit => {
+                self.confirm_quit = false;
+            }
+
+            AppEvent::ConfirmQuit => {
                 let _ = self.worker_tx.try_send(WorkerCommand::Shutdown);
                 self.should_quit = true;
             }
@@ -220,6 +265,106 @@ impl App {
                     job.status = JobStatus::Failed(error);
                 }
             }
+
+            AppEvent::ToggleSettings => {
+                if self.settings_popup.is_some() {
+                    self.settings_popup = None;
+                } else {
+                    self.settings_popup = Some(SettingsState::new(
+                        self.config.max_concurrent_downloads,
+                        self.config.output_dir.clone(),
+                    ));
+                }
+            }
+
+            AppEvent::CloseSettings => {
+                self.settings_popup = None;
+            }
+
+            AppEvent::SettingsNext => {
+                if let Some(ref mut settings) = self.settings_popup {
+                    settings.selected_field = (settings.selected_field + 1).min(1);
+                    settings.editing_path = false;
+                }
+            }
+
+            AppEvent::SettingsPrev => {
+                if let Some(ref mut settings) = self.settings_popup {
+                    settings.selected_field = settings.selected_field.saturating_sub(1);
+                    settings.editing_path = false;
+                }
+            }
+
+            AppEvent::SettingsIncrement => {
+                if let Some(ref mut settings) = self.settings_popup {
+                    if settings.selected_field == 0 {
+                        settings.concurrent_downloads = (settings.concurrent_downloads + 1).min(10);
+                    }
+                }
+            }
+
+            AppEvent::SettingsDecrement => {
+                if let Some(ref mut settings) = self.settings_popup {
+                    if settings.selected_field == 0 {
+                        settings.concurrent_downloads = settings.concurrent_downloads.saturating_sub(1).max(1);
+                    }
+                }
+            }
+
+            AppEvent::SettingsToggleEdit => {
+                if let Some(ref mut settings) = self.settings_popup {
+                    if settings.selected_field == 1 {
+                        settings.editing_path = !settings.editing_path;
+                    }
+                }
+            }
+
+            AppEvent::SettingsCharInput(c) => {
+                if let Some(ref mut settings) = self.settings_popup {
+                    if settings.editing_path {
+                        settings.output_dir.push(c);
+                    }
+                }
+            }
+
+            AppEvent::SettingsBackspace => {
+                if let Some(ref mut settings) = self.settings_popup {
+                    if settings.editing_path {
+                        settings.output_dir.pop();
+                    }
+                }
+            }
+
+            AppEvent::SaveSettings => {
+                if let Some(settings) = self.settings_popup.take() {
+                    self.config.max_concurrent_downloads = settings.concurrent_downloads;
+                    self.config.output_dir = std::path::PathBuf::from(&settings.output_dir);
+                    
+                    if self.worker_tx.try_send(WorkerCommand::UpdateConcurrent(settings.concurrent_downloads)).is_err() {
+                        tracing::warn!("Failed to send UpdateConcurrent command");
+                    }
+                    
+                    let config = self.config.clone();
+                    tokio::spawn(async move {
+                        if let Err(e) = config.save().await {
+                            tracing::warn!("Failed to save config: {}", e);
+                        }
+                    });
+                }
+            }
+
+            AppEvent::PlaylistExpanded { urls } => {
+                self.loading_playlists = self.loading_playlists.saturating_sub(1);
+                for (url, title) in urls {
+                    let mut job = Job::new(&url);
+                    job.title = title;
+                    let job_id = job.id;
+                    self.jobs.push(job);
+                    if self.worker_tx.try_send(WorkerCommand::FetchFormats { job_id, url }).is_err() {
+                        tracing::warn!("Worker channel full: FetchFormats dropped");
+                    }
+                }
+            }
         }
     }
 
@@ -227,38 +372,45 @@ impl App {
         self.jobs.get(self.selected_index)
     }
 
-    pub fn fetching_count(&self) -> usize {
-        self.jobs
-            .iter()
-            .filter(|j| matches!(j.status, JobStatus::FetchingFormats))
-            .count()
+    pub fn status_counts(&self) -> StatusCounts {
+        self.jobs.iter().fold(StatusCounts::default(), |mut c, j| {
+            match &j.status {
+                JobStatus::FetchingFormats => c.fetching += 1,
+                JobStatus::Ready { .. } => c.ready += 1,
+                JobStatus::Queued => c.queued += 1,
+                JobStatus::Downloading { .. } => c.active += 1,
+                JobStatus::Completed => c.completed += 1,
+                JobStatus::Failed(_) => c.failed += 1,
+                JobStatus::Cancelled => {},
+            }
+            c
+        })
     }
 
-    pub fn ready_count(&self) -> usize {
-        self.jobs
-            .iter()
-            .filter(|j| matches!(j.status, JobStatus::Ready { .. }))
-            .count()
+    pub fn aggregate_progress(&self) -> Option<(f32, String, String)> {
+        let active: Vec<_> = self.jobs.iter().filter_map(|j| {
+            if let JobStatus::Downloading { percent, speed, eta } = &j.status {
+                Some((percent, speed.clone(), eta.clone()))
+            } else {
+                None
+            }
+        }).collect();
+        
+        if active.is_empty() {
+            return None;
+        }
+        
+        let avg_percent = active.iter().map(|(p, _, _)| *p).sum::<f32>() / active.len() as f32;
+        let combined_speed = active.first().map(|(_, s, _)| s.clone()).unwrap_or_default();
+        let eta = active.first().map(|(_, _, e)| e.clone()).unwrap_or_default();
+        
+        Some((avg_percent, combined_speed, eta))
     }
+}
 
-    pub fn queued_count(&self) -> usize {
-        self.jobs
-            .iter()
-            .filter(|j| j.status == JobStatus::Queued)
-            .count()
-    }
-
-    pub fn active_count(&self) -> usize {
-        self.jobs
-            .iter()
-            .filter(|j| matches!(j.status, JobStatus::Downloading { .. }))
-            .count()
-    }
-
-    pub fn completed_count(&self) -> usize {
-        self.jobs
-            .iter()
-            .filter(|j| j.status == JobStatus::Completed)
-            .count()
-    }
+fn is_playlist_url(url: &str) -> bool {
+    url.contains("youtube.com/playlist") 
+        || url.contains("youtu.be/playlist")
+        || (url.contains("youtube.com/watch") && url.contains("&list="))
+        || (url.contains("youtu.be/") && url.contains("?list="))
 }

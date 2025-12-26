@@ -8,6 +8,14 @@ pub fn handle_key(key: KeyEvent, app: &mut App) -> Option<AppEvent> {
         return Some(AppEvent::Quit);
     }
 
+    if app.confirm_quit {
+        return match key.code {
+            KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => Some(AppEvent::ConfirmQuit),
+            KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => Some(AppEvent::CancelQuit),
+            _ => None,
+        };
+    }
+
     if app.show_help {
         match key.code {
             KeyCode::Esc | KeyCode::Char('?') | KeyCode::Char('q') => {
@@ -20,6 +28,10 @@ pub fn handle_key(key: KeyEvent, app: &mut App) -> Option<AppEvent> {
 
     if app.format_popup.is_some() {
         return handle_format_popup(key);
+    }
+
+    if app.settings_popup.is_some() {
+        return handle_settings_popup(key, app);
     }
 
     if key.code == KeyCode::Tab {
@@ -74,6 +86,7 @@ fn handle_queue_mode(key: KeyEvent, app: &mut App) -> Option<AppEvent> {
     match key.code {
         KeyCode::Char('q') => Some(AppEvent::Quit),
         KeyCode::Char('?') => Some(AppEvent::ToggleHelp),
+        KeyCode::Char('g') => Some(AppEvent::ToggleSettings),
         KeyCode::Char('j') | KeyCode::Down => Some(AppEvent::SelectNext),
         KeyCode::Char('k') | KeyCode::Up => Some(AppEvent::SelectPrev),
         KeyCode::Enter => {
@@ -85,12 +98,43 @@ fn handle_queue_mode(key: KeyEvent, app: &mut App) -> Option<AppEvent> {
             None
         }
         KeyCode::Char('s') => Some(AppEvent::StartDownloads),
+        KeyCode::Char('S') => Some(AppEvent::ToggleSysInfo),
         KeyCode::Char('d') => app.selected_job().map(|j| AppEvent::RemoveJob(j.id)),
         KeyCode::Char('c') => app.selected_job().map(|j| AppEvent::CancelJob(j.id)),
         KeyCode::Char('i') | KeyCode::Char('/') => {
             app.input_mode = true;
             None
         }
+        _ => None,
+    }
+}
+
+fn handle_settings_popup(key: KeyEvent, app: &App) -> Option<AppEvent> {
+    let settings = app.settings_popup.as_ref()?;
+    
+    if settings.editing_path {
+        return match key.code {
+            KeyCode::Esc | KeyCode::Enter => Some(AppEvent::SettingsToggleEdit),
+            KeyCode::Backspace => Some(AppEvent::SettingsBackspace),
+            KeyCode::Char(c) => Some(AppEvent::SettingsCharInput(c)),
+            _ => None,
+        };
+    }
+    
+    match key.code {
+        KeyCode::Char('j') | KeyCode::Down => Some(AppEvent::SettingsNext),
+        KeyCode::Char('k') | KeyCode::Up => Some(AppEvent::SettingsPrev),
+        KeyCode::Char('l') | KeyCode::Right | KeyCode::Char('+') => Some(AppEvent::SettingsIncrement),
+        KeyCode::Char('h') | KeyCode::Left | KeyCode::Char('-') => Some(AppEvent::SettingsDecrement),
+        KeyCode::Enter => {
+            if settings.selected_field == 0 {
+                Some(AppEvent::SaveSettings)
+            } else {
+                Some(AppEvent::SettingsToggleEdit)
+            }
+        }
+        KeyCode::Char('s') => Some(AppEvent::SaveSettings),
+        KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('g') => Some(AppEvent::CloseSettings),
         _ => None,
     }
 }

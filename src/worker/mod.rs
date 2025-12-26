@@ -53,7 +53,16 @@ impl WorkerPool {
                     });
                 }
 
-                WorkerCommand::StartJob { job, format_id } => {
+                WorkerCommand::FetchPlaylist { url } => {
+                    let event_tx = self.event_tx.clone();
+                    tokio::spawn(async move {
+                        if let Ok(urls) = ytdlp::fetch_playlist(&url).await {
+                            let _ = event_tx.send(AppEvent::PlaylistExpanded { urls }).await;
+                        }
+                    });
+                }
+
+                WorkerCommand::StartJob { job_id, url, format_id } => {
                     let permit = semaphore.clone().acquire_owned().await;
                     if permit.is_err() {
                         continue;
@@ -63,13 +72,12 @@ impl WorkerPool {
                     let cancel_token = CancellationToken::new();
                     {
                         let mut jobs = self.active_jobs.lock().await;
-                        jobs.insert(job.id, cancel_token.clone());
+                        jobs.insert(job_id, cancel_token.clone());
                     }
 
                     let event_tx = self.event_tx.clone();
                     let config = self.config.clone();
                     let active_jobs = self.active_jobs.clone();
-                    let job_id = job.id;
 
                     tokio::spawn(async move {
                         let _permit = permit;
@@ -77,7 +85,8 @@ impl WorkerPool {
                         let _ = event_tx.send(AppEvent::JobStarted { id: job_id }).await;
 
                         let result = ytdlp::download(
-                            &job,
+                            job_id,
+                            &url,
                             &format_id,
                             &config,
                             event_tx.clone(),
@@ -111,6 +120,10 @@ impl WorkerPool {
                     if let Some(token) = jobs.get(&id) {
                         token.cancel();
                     }
+                }
+
+                WorkerCommand::UpdateConcurrent(count) => {
+                    tracing::info!("Concurrent downloads setting updated to {}. Takes effect on next app restart.", count);
                 }
 
                 WorkerCommand::Shutdown => {

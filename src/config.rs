@@ -32,7 +32,7 @@ impl Config {
             .map(|dirs| dirs.config_dir().join("config.toml"))
     }
 
-    pub fn load() -> Result<Self> {
+    pub async fn load() -> Result<Self> {
         let Some(path) = Self::config_path() else {
             return Ok(Self::default());
         };
@@ -41,30 +41,31 @@ impl Config {
             return Ok(Self::default());
         }
 
-        let content = std::fs::read_to_string(&path)?;
+        let content = tokio::fs::read_to_string(&path).await?;
         let config: Config = toml::from_str(&content)?;
         Ok(config)
     }
 
-    pub fn save(&self) -> Result<()> {
+    pub async fn save(&self) -> Result<()> {
         let Some(path) = Self::config_path() else {
             return Ok(());
         };
 
         if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
+            tokio::fs::create_dir_all(parent).await?;
         }
 
         let content = toml::to_string_pretty(self)?;
-        std::fs::write(&path, content)?;
+        tokio::fs::write(&path, content).await?;
         Ok(())
     }
 }
 
-pub fn check_ytdlp() -> Result<String> {
-    let output = std::process::Command::new("yt-dlp")
+pub async fn check_ytdlp() -> Result<String> {
+    let output = tokio::process::Command::new("yt-dlp")
         .arg("--version")
-        .output()?;
+        .output()
+        .await?;
 
     if !output.status.success() {
         color_eyre::eyre::bail!("yt-dlp is not installed or not in PATH");
