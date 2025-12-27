@@ -170,9 +170,16 @@ panic = "abort"      # No unwinding for smaller binary
 ## Usage
 
 ```bash
-oxidlp [OPTIONS]
+cargo run --release
 ```
 
+Or if you've built the binary:
+
+```bash
+./target/release/oxidlp
+```
+
+The TUI will launch and you can paste YouTube URLs directly into the input field.
 ### Keyboard Shortcuts
 
 | Key | Action |

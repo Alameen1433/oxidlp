@@ -97,45 +97,48 @@ async fn run_app<B: Backend>(
 ) -> Result<()> {
     let pid = sysinfo::Pid::from_u32(std::process::id());
     
-    // Initial CPU refresh to establish baseline
+    // Initial CPU refresh - need two calls with delay to establish baseline
+    app.sysinfo.refresh_cpu_all();
+    app.sysinfo.refresh_processes(sysinfo::ProcessesToUpdate::Some(&[pid]), true);
+    std::thread::sleep(Duration::from_millis(500));
     app.sysinfo.refresh_cpu_all();
     app.sysinfo.refresh_processes(sysinfo::ProcessesToUpdate::Some(&[pid]), true);
     
     let mut last_sysinfo_refresh = std::time::Instant::now();
-    const SYSINFO_REFRESH_INTERVAL: Duration = Duration::from_millis(500);
+    const SYSINFO_REFRESH_INTERVAL: Duration = Duration::from_millis(1000);
     
     loop {
-        // Refresh sysinfo at fixed interval, not every frame
+        while event::poll(Duration::from_millis(0))? {
+            if let Event::Key(key) = event::read()? {
+                if key.kind == KeyEventKind::Press {
+                    if let Some(app_event) = ui::input::handle_key(key, app) {
+                        app.handle_event(app_event);
+                    }
+                }
+            }
+        }
+        
+        while let Ok(worker_event) = event_rx.try_recv() {
+            app.handle_event(worker_event);
+        }
+        
         if app.show_sysinfo && last_sysinfo_refresh.elapsed() >= SYSINFO_REFRESH_INTERVAL {
             app.sysinfo.refresh_cpu_all();
             app.sysinfo.refresh_processes(sysinfo::ProcessesToUpdate::Some(&[pid]), true);
             last_sysinfo_refresh = std::time::Instant::now();
         }
+        
         if app.loading_playlists > 0 {
             app.spinner_frame = app.spinner_frame.wrapping_add(1);
         }
+        
         terminal.draw(|f| ui::render(f, app))?;
-
-        tokio::select! {
-            Some(worker_event) = event_rx.recv() => {
-                app.handle_event(worker_event);
-            }
-            _ = tokio::time::sleep(Duration::from_millis(16)) => {
-                if event::poll(Duration::from_millis(0))? {
-                    if let Event::Key(key) = event::read()? {
-                        if key.kind == KeyEventKind::Press {
-                            if let Some(app_event) = ui::input::handle_key(key, app) {
-                                app.handle_event(app_event);
-                            }
-                        }
-                    }
-                }
-            }
-        }
 
         if app.should_quit {
             break;
         }
+        
+        tokio::time::sleep(Duration::from_millis(16)).await;
     }
 
     Ok(())
