@@ -273,7 +273,7 @@ fn render_details(f: &mut Frame, app: &App, area: Rect) {
                 lines.push(Line::from(Span::styled("Press Enter to change format", Style::default().fg(MUTED))));
             }
         }
-        JobStatus::Downloading { percent, speed, eta } => {
+        JobStatus::Downloading { percent, speed, eta, .. } => {
             lines.push(Line::from(Span::styled("Downloading...", Style::default().fg(CYAN))));
             
             let bar_width = (inner.width as usize).saturating_sub(2);
@@ -588,7 +588,16 @@ fn render_sysinfo(f: &mut Frame, app: &App, area: Rect) {
     ];
     
     if let Some((percent, speed, eta)) = app.aggregate_progress() {
+        // Count how many are downloading
+        let active_count = app.jobs.iter()
+            .filter(|j| matches!(j.status, JobStatus::Downloading { .. }))
+            .count();
+        
         lines.push(Line::from(""));
+        lines.push(Line::from(vec![
+            Span::styled("JOBS ", Style::default().fg(MUTED)),
+            Span::styled(format!("{} active", active_count), Style::default().fg(YELLOW)),
+        ]));
         let bar_width = (area.width as usize).saturating_sub(4);
         let bar = progress_bar(bar_width, percent);
         lines.push(Line::from(Span::styled(bar, Style::default().fg(CYAN))));

@@ -2,7 +2,7 @@ use sysinfo::System;
 use tokio::sync::mpsc;
 
 use crate::config::Config;
-use crate::events::{AppEvent, FormatPopupState, Job, JobStatus, SettingsState, StatusCounts, WorkerCommand};
+use crate::events::{AppEvent, DownloadPhase, FormatPopupState, Job, JobStatus, SettingsState, StatusCounts, WorkerCommand};
 
 pub struct App {
     pub jobs: Vec<Job>,
@@ -38,7 +38,7 @@ impl App {
             format_popup: None,
             settings_popup: None,
             config,
-            sysinfo: System::new_all(),
+            sysinfo: System::new(),
             worker_tx,
         }
     }
@@ -231,6 +231,7 @@ impl App {
                         percent: 0.0,
                         speed: "--".into(),
                         eta: "--".into(),
+                        phase: DownloadPhase::Video,
                     };
                 }
             }
@@ -247,9 +248,9 @@ impl App {
                 }
             }
 
-            AppEvent::JobProgress { id, percent, speed, eta } => {
+            AppEvent::JobProgress { id, percent, speed, eta, phase } => {
                 if let Some(job) = self.jobs.iter_mut().find(|j| j.id == id) {
-                    job.status = JobStatus::Downloading { percent, speed, eta };
+                    job.status = JobStatus::Downloading { percent, speed, eta, phase };
                 }
             }
 
@@ -388,23 +389,41 @@ impl App {
     }
 
     pub fn aggregate_progress(&self) -> Option<(f32, String, String)> {
-        let active: Vec<_> = self.jobs.iter().filter_map(|j| {
-            if let JobStatus::Downloading { percent, speed, eta } = &j.status {
-                Some((percent, speed.clone(), eta.clone()))
-            } else {
-                None
-            }
-        }).collect();
+        let downloading: Vec<_> = self.jobs.iter()
+            .filter(|j| matches!(j.status, JobStatus::Downloading { .. }))
+            .collect();
         
-        if active.is_empty() {
+        if downloading.is_empty() {
             return None;
         }
         
-        let avg_percent = active.iter().map(|(p, _, _)| *p).sum::<f32>() / active.len() as f32;
-        let combined_speed = active.first().map(|(_, s, _)| s.clone()).unwrap_or_default();
-        let eta = active.first().map(|(_, _, e)| e.clone()).unwrap_or_default();
+        // Calculate weighted progress based on phase
+        let total_progress: f32 = downloading.iter()
+            .map(|j| {
+                if let JobStatus::Downloading { percent, phase, .. } = &j.status {
+                    match phase {
+                        DownloadPhase::Video => percent * 0.5,           // 0-50%
+                        DownloadPhase::Audio => 50.0 + percent * 0.4,   // 50-90%
+                        DownloadPhase::Merging => 90.0 + percent * 0.1, // 90-100%
+                        DownloadPhase::Single => *percent,              // 0-100%
+                    }
+                } else {
+                    0.0
+                }
+            })
+            .sum();
         
-        Some((avg_percent, combined_speed, eta))
+        let avg_progress = total_progress / downloading.len() as f32;
+        
+        // Use most recent job's speed and ETA
+        let (speed, eta) = downloading.last()
+            .and_then(|j| match &j.status {
+                JobStatus::Downloading { speed, eta, .. } => Some((speed.clone(), eta.clone())),
+                _ => None,
+            })
+            .unwrap_or_default();
+        
+        Some((avg_progress, speed, eta))
     }
 }
 

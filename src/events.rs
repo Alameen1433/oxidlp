@@ -169,7 +169,7 @@ pub enum AppEvent {
 
     JobStarted { id: JobId },
     FormatsReady { id: JobId, title: String, formats: Vec<Format> },
-    JobProgress { id: JobId, percent: f32, speed: String, eta: String },
+    JobProgress { id: JobId, percent: f32, speed: String, eta: String, phase: DownloadPhase },
     JobCompleted { id: JobId, path: PathBuf },
     JobFailed { id: JobId, error: String },
     PlaylistExpanded { urls: Vec<(String, Option<String>)> },
@@ -185,12 +185,21 @@ pub enum WorkerCommand {
     Shutdown,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub enum DownloadPhase {
+    #[default]
+    Video,
+    Audio,
+    Merging,
+    Single,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum JobStatus {
     FetchingFormats,
     Ready { formats: Vec<Format> },
     Queued,
-    Downloading { percent: f32, speed: String, eta: String },
+    Downloading { percent: f32, speed: String, eta: String, phase: DownloadPhase },
     Completed,
     Failed(String),
     Cancelled,

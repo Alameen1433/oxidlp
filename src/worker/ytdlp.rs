@@ -9,7 +9,7 @@ use color_eyre::Result;
 use serde::Deserialize;
 
 use crate::config::Config;
-use crate::events::{AppEvent, Format, JobId};
+use crate::events::{AppEvent, DownloadPhase, Format, JobId};
 
 #[derive(Debug, Deserialize)]
 struct VideoInfo {
@@ -131,6 +131,7 @@ pub async fn download(
     let mut reader = BufReader::new(stdout).lines();
 
     let mut final_path: Option<PathBuf> = None;
+    let mut current_phase = DownloadPhase::Video;
 
     loop {
         tokio::select! {
@@ -141,12 +142,24 @@ pub async fn download(
             result = reader.next_line() => {
                 match result {
                     Ok(Some(line_content)) => {
+                        // Detect phase changes from yt-dlp output
+                        if line_content.contains("[Merger]") || line_content.contains("[ffmpeg]") {
+                            current_phase = DownloadPhase::Merging;
+                        } else if line_content.contains("[download] Destination:") {
+                            if line_content.contains(".f") && (line_content.contains("audio") || line_content.contains(".m4a") || line_content.contains(".webm")) {
+                                current_phase = DownloadPhase::Audio;
+                            } else {
+                                current_phase = DownloadPhase::Video;
+                            }
+                        }
+                        
                         if let Some(progress) = parse_progress(&line_content) {
                             let _ = event_tx.send(AppEvent::JobProgress {
                                 id: job_id,
                                 percent: progress.percent,
                                 speed: progress.speed,
                                 eta: progress.eta,
+                                phase: current_phase,
                             }).await;
                         } else if !line_content.starts_with('[') && line_content.contains('/') {
                             final_path = Some(PathBuf::from(line_content.trim()));

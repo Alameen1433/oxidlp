@@ -97,9 +97,19 @@ async fn run_app<B: Backend>(
 ) -> Result<()> {
     let pid = sysinfo::Pid::from_u32(std::process::id());
     
+    // Initial CPU refresh to establish baseline
+    app.sysinfo.refresh_cpu_all();
+    app.sysinfo.refresh_processes(sysinfo::ProcessesToUpdate::Some(&[pid]), true);
+    
+    let mut last_sysinfo_refresh = std::time::Instant::now();
+    const SYSINFO_REFRESH_INTERVAL: Duration = Duration::from_millis(500);
+    
     loop {
-        if app.show_sysinfo {
+        // Refresh sysinfo at fixed interval, not every frame
+        if app.show_sysinfo && last_sysinfo_refresh.elapsed() >= SYSINFO_REFRESH_INTERVAL {
+            app.sysinfo.refresh_cpu_all();
             app.sysinfo.refresh_processes(sysinfo::ProcessesToUpdate::Some(&[pid]), true);
+            last_sysinfo_refresh = std::time::Instant::now();
         }
         if app.loading_playlists > 0 {
             app.spinner_frame = app.spinner_frame.wrapping_add(1);
