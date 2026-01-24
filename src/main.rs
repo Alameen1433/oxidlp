@@ -102,32 +102,46 @@ async fn run_app<B: Backend>(
     
     let mut last_sysinfo_refresh = std::time::Instant::now();
     const SYSINFO_REFRESH_INTERVAL: Duration = Duration::from_millis(1000);
+    let mut should_render = true;
     
     loop {
         while event::poll(Duration::from_millis(0))? {
-            if let Event::Key(key) = event::read()? {
-                if key.kind == KeyEventKind::Press {
-                    if let Some(app_event) = ui::input::handle_key(key, app) {
-                        app.handle_event(app_event);
+            match event::read()? {
+                Event::Key(key) => {
+                    if key.kind == KeyEventKind::Press {
+                        should_render = true;
+                        if let Some(app_event) = ui::input::handle_key(key, app) {
+                            app.handle_event(app_event);
+                        }
                     }
                 }
+                Event::Resize(_, _) => {
+                    should_render = true;
+                }
+                _ => {}
             }
         }
         
         while let Ok(worker_event) = event_rx.try_recv() {
             app.handle_event(worker_event);
+            should_render = true;
         }
         
         if app.show_sysinfo && last_sysinfo_refresh.elapsed() >= SYSINFO_REFRESH_INTERVAL {
             app.sysinfo.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
             last_sysinfo_refresh = std::time::Instant::now();
+            should_render = true;
         }
         
         if app.loading_playlists > 0 {
             app.spinner_frame = app.spinner_frame.wrapping_add(1);
+            should_render = true;
         }
         
-        terminal.draw(|f| ui::render(f, app))?;
+        if should_render {
+            terminal.draw(|f| ui::render(f, app))?;
+            should_render = false;
+        }
 
         if app.should_quit {
             break;
